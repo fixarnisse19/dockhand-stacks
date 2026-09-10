@@ -32,7 +32,8 @@ services:
       TZ: ${TZ:-Europe/Stockholm}
       # Krävs bakom Traefik för att X-Forwarded-* ska litas på.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
-      PROJECTS_DIRECTORY: /app/data/projects
+      # Samma sökväg som på värden — se kommentaren vid volymen nedan.
+      PROJECTS_DIRECTORY: ${STACKS_DIR:?}
       PROJECT_SCAN_MAX_DEPTH: ${PROJECT_SCAN_MAX_DEPTH:-4}
       ARCANE_BACKUP_VOLUME_NAME: ${ARCANE_BACKUP_VOLUME_NAME:-arcane-backups}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -43,8 +44,14 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Databas, inställningar, git-arbetskopior, templates.
       - ${ARCANE_ROOT:?}/data:/app/data
-      # Projektroten. Allt som ligger här dyker upp som projekt i Arcane.
-      - ${STACKS_DIR:?}:/app/data/projects
+      # Projektroten, monterad på SAMMA sökväg inuti containern som på
+      # värden. Det är inte kosmetika: Docker-daemonen tolkar bind mounts mot
+      # värdens filsystem, så en stack med `./config:/config` skulle annars
+      # peka på en sökväg som bara finns inuti Arcane-containern. Samma
+      # avvikelse gör att Arcane läser fel `com.docker.compose.project.
+      # working_dir` och visar körande projekt som stoppade.
+      # https://github.com/getarcaneapp/arcane/issues/2597
+      - ${STACKS_DIR:?}:${STACKS_DIR:?}
       # Arbetsyta för image-builds (Settings -> Builds -> Builds Directory=/builds).
       - ${ARCANE_ROOT:?}/builds:/builds
       # Volymbackuper (rustic-snapshots). Ligger på /volume1 => med i NAS-backupen.

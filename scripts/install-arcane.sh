@@ -8,6 +8,12 @@
 # Idempotent: kan köras om hur många gånger som helst. En befintlig .env
 # skrivs aldrig över och ENCRYPTION_KEY genereras bara första gången.
 #
+# Flaggor:
+#   --autodetect  Läs av var Dockhand/Portainer och stackarna ligger på den
+#                 här värden och sätt ARCANE_ROOT/STACKS_DIR därefter.
+#   --hardened    Kör utan direkt tillgång till docker.sock.
+#   -y, --yes     Fråga inget.
+#
 # Miljövariabler för icke-interaktiv körning:
 #   ARCANE_HOST=arcane.example.com PROXY_NETWORK=dokploy-network \
 #     bash scripts/install-arcane.sh --yes
@@ -19,13 +25,15 @@ STACK_DIR="$REPO_ROOT/stacks/arcane"
 ENV_FILE="$STACK_DIR/.env"
 COMPOSE_FILE="${COMPOSE_FILE_OVERRIDE:-$STACK_DIR/compose.yaml}"
 ASSUME_YES=0
+AUTODETECT=0
 
 for arg in "$@"; do
   case "$arg" in
     -y|--yes) ASSUME_YES=1 ;;
+    --autodetect) AUTODETECT=1 ;;
     --hardened) COMPOSE_FILE="$STACK_DIR/compose.socket-proxy.yaml" ;;
     -h|--help)
-      sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "Okänt argument: $arg" >&2; exit 2 ;;
   esac
@@ -76,6 +84,26 @@ if [ -z "$(get_env ENCRYPTION_KEY)" ]; then
   log "ENCRYPTION_KEY genererad (32 bytes). Ta en backup av $ENV_FILE."
 else
   log "ENCRYPTION_KEY finns redan — behålls."
+fi
+
+# Sökvägar: läs av hur värden faktiskt ser ut. Explicita miljövariabler
+# vinner över autodetekteringen, som i sin tur vinner över filens värden.
+if [ "$AUTODETECT" -eq 1 ]; then
+  log "Läser av hur Docker ligger på den här värden"
+  detected="$(bash "$REPO_ROOT/scripts/inspect-docker-layout.sh" --suggest || true)"
+  if [ -z "$detected" ]; then
+    warn "Autodetekteringen gav inget — behåller värdena i $ENV_FILE"
+  else
+    while IFS='=' read -r k v; do
+      [ -n "$k" ] || continue
+      if [ -n "${!k:-}" ]; then
+        log "$k: behåller ${!k} från miljön (autodetektering föreslog $v)"
+      else
+        set_env "$k" "$v"
+        log "$k=$v (autodetekterad)"
+      fi
+    done <<< "$detected"
+  fi
 fi
 
 # Domän: från miljövariabel, annars fråga, annars behåll det som står i filen.

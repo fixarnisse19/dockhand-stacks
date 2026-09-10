@@ -90,13 +90,14 @@ services:
       PGID: ${PGID:-1000}
       TZ: ${TZ:-Europe/Stockholm}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
-      PROJECTS_DIRECTORY: /app/data/projects
+      PROJECTS_DIRECTORY: ${STACKS_DIR:?}
       PROJECT_SCAN_MAX_DEPTH: ${PROJECT_SCAN_MAX_DEPTH:-4}
       ARCANE_BACKUP_VOLUME_NAME: ${ARCANE_BACKUP_VOLUME_NAME:-arcane-backups}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - ${ARCANE_ROOT:?}/data:/app/data
-      - ${STACKS_DIR:?}:/app/data/projects
+      # Matchande sökväg värd/container — se compose.yaml.
+      - ${STACKS_DIR:?}:${STACKS_DIR:?}
       - ${ARCANE_ROOT:?}/builds:/builds
       - ${ARCANE_ROOT:?}/backups:/backups
     ports:

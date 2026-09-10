@@ -10,23 +10,61 @@ volymbackuper och GitOps mot den här repon.
 
 ## Så här ligger det på NAS:en
 
+Arcane läggs i samma appkatalog som de andra hanterarna — en mapp per program,
+vilket är konventionen både Portainer (`/volume1/docker/portainer:/data`) och
+Dockhand följer:
+
 ```
 /volume1/docker/
+├── portainer/               Portainers data
+├── dockhand/
+│   └── app-data/            Dockhands DATA_DIR
+│       └── stacks/          ← stackarna bor här
 ├── arcane/                  ARCANE_ROOT — Arcanes egen data
 │   ├── data/                databas, inställningar, git-arbetskopior  (/app/data)
 │   ├── builds/              arbetsyta för image-builds                (/builds)
 │   └── backups/             rustic-snapshots av volymer              (/backups)
-└── stacks/                  STACKS_DIR — projektroten                (/app/data/projects)
-    ├── minapp/compose.yaml
-    └── ...
+├── vaultwarden/
+└── ...
 ```
 
-`arcane/` ligger **utanför** `stacks/` med flit. Låg den inuti skulle Arcane
-se sig själv som ett projekt, och en container kan inte riva och återskapa sig
-själv mitt i en redeploy ([arcane#2371]). Uppgradera Arcane från kommandoraden
-i stället — se *Uppgradera* nedan.
+Var stackarna ligger hos *dig* vet bara NAS:en. Kör
+
+```bash
+bash scripts/inspect-docker-layout.sh
+```
+
+så listas varje hanterare, dess bind mounts, alla compose-projekt med sina
+arbetskataloger, och ett förslag på `ARCANE_ROOT`/`STACKS_DIR`. Skriptet läser
+bara — det ändrar ingenting.
+
+### Två regler som styr sökvägarna
+
+**1. `STACKS_DIR` monteras på samma sökväg inuti containern som på värden.**
+
+```yaml
+- ${STACKS_DIR}:${STACKS_DIR}      # inte :/app/data/projects
+```
+
+Docker-daemonen tolkar alla bind mounts mot *värdens* filsystem. Monteras
+projektroten på en annan sökväg inuti Arcane pekar en stack med
+`./config:/config` på en katalog som bara finns inuti Arcane-containern. Samma
+avvikelse gör att Arcane jämför fel `com.docker.compose.project.working_dir`
+och visar körande projekt som stoppade ([arcane#2597]).
+
+Delar du katalog med Dockhand är matchande sökvägar dessutom vad Dockhand själv
+rekommenderar (`/opt/dockhand:/opt/dockhand` med `DATA_DIR=/opt/dockhand`), så
+båda hanterarna ser stackarna likadant.
+
+**2. `ARCANE_ROOT` ligger utanför `STACKS_DIR`.**
+
+Låg den inuti skulle Arcane se sig själv som ett projekt, och en container kan
+inte riva och återskapa sig själv mitt i en redeploy ([arcane#2371]).
+Installationsskriptet vägrar starta om sökvägarna nästlas fel. Uppgradera
+Arcane från kommandoraden i stället — se *Uppgradera* nedan.
 
 [arcane#2371]: https://github.com/getarcaneapp/arcane/issues/2371
+[arcane#2597]: https://github.com/getarcaneapp/arcane/issues/2597
 
 ## Installation
 
@@ -35,8 +73,15 @@ Checka ut repon på NAS:en och kör installationsskriptet:
 ```bash
 git clone https://github.com/fixarnisse19/dockhand-stacks.git /volume1/docker/arcane/repo
 cd /volume1/docker/arcane/repo
-sudo bash scripts/install-arcane.sh
+
+bash scripts/inspect-docker-layout.sh          # var ligger allting idag?
+sudo bash scripts/install-arcane.sh --autodetect
 ```
+
+`--autodetect` sätter `ARCANE_ROOT` och `STACKS_DIR` efter vad som faktiskt
+finns på värden: Arcane hamnar bredvid Dockhand och Portainer, och projektroten
+pekas på den katalog stackarna redan ligger i. Utan flaggan används värdena i
+`.env`. Miljövariabler du sätter själv vinner alltid över autodetekteringen.
 
 Skriptet frågar efter domän, genererar `ENCRYPTION_KEY`, skapar katalogerna med
 rätt ägare, kontrollerar att Traefiks nätverk finns och startar stacken. Det är
@@ -73,7 +118,7 @@ Allt sitter i `.env` bredvid `compose.yaml` (kopia av
 | `ARCANE_HOST` | Domänen Traefik svarar på |
 | `APP_URL` | Måste vara exakt samma URL som du surfar på — annars går websockets, OIDC och passkeys sönder |
 | `ENCRYPTION_KEY` | 32 bytes. Krypterar registry-lösenord, git-tokens och OIDC-secrets i databasen |
-| `ARCANE_ROOT` / `STACKS_DIR` | Sökvägarna ovan |
+| `ARCANE_ROOT` / `STACKS_DIR` | Sökvägarna ovan — sätts enklast med `--autodetect` |
 | `PROXY_NETWORK` | Traefiks docker-nätverk (`proxy`, eller `dokploy-network` om du använder Dokploys Traefik) |
 | `TRUSTED_PROXIES` | CIDR:er som får sätta `X-Forwarded-For` |
 | `PUID` / `PGID` | Ägare till filerna Arcane skriver i `STACKS_DIR` |
@@ -149,7 +194,9 @@ Två separata saker:
 | Terminal/loggar dör efter ~60 s | `readtimeout` på Traefiks entrypoint, se ovan. |
 | Inloggning studsar tillbaka | `APP_URL` matchar inte adressen i webbläsaren. |
 | Containern blir `unhealthy` | `docker logs --tail 100 arcane`. Vid första start körs databasmigreringar — `start_period` är 30 s. |
-| Inga projekt syns | Fel `STACKS_DIR`, eller compose-filerna ligger djupare än `PROJECT_SCAN_MAX_DEPTH`. |
+| Inga projekt syns | Fel `STACKS_DIR`, eller compose-filerna ligger djupare än `PROJECT_SCAN_MAX_DEPTH`. Kör `scripts/inspect-docker-layout.sh`. |
+| Projekt visas som stoppade fast de kör | `STACKS_DIR` är monterad på en annan sökväg inuti containern. Ska vara `${STACKS_DIR}:${STACKS_DIR}` ([arcane#2597]). |
+| Stackens `./config`-mappar hamnar fel | Samma sak — matchande sökväg saknas. |
 | `permission denied` mot socketen | Kör Arcane som root på värden eller använd `--hardened`-varianten. |
 
 ## Se även
