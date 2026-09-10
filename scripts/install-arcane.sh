@@ -33,7 +33,7 @@ for arg in "$@"; do
     --autodetect) AUTODETECT=1 ;;
     --hardened) COMPOSE_FILE="$STACK_DIR/compose.socket-proxy.yaml" ;;
     -h|--help)
-      sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"
       exit 0 ;;
     *) echo "Okänt argument: $arg" >&2; exit 2 ;;
   esac
@@ -61,10 +61,11 @@ fi
 
 # Sätter en nyckel i .env utan att duplicera raden.
 set_env() {
-  local key="$1" val="$2"
+  local key="$1" val="$2" esc
+  # & och \ har betydelse i sed:s ersättningssträng, | är vår avgränsare.
+  esc="$(printf '%s' "$val" | sed -e 's/[\\&|]/\\\\&/g')"
   if grep -q "^${key}=" "$ENV_FILE"; then
-    # | som avgränsare: värdena innehåller sökvägar och URL:er, inte pipes.
-    sed -i "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
+    sed -i "s|^${key}=.*|${key}=${esc}|" "$ENV_FILE"
   else
     printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"
   fi
@@ -151,15 +152,55 @@ case "$ARCANE_ROOT_V/" in
     ;;
 esac
 
+# Ägaren till en katalog, som "uid:gid". stat -c finns på DSM; ls -ldn är
+# reservvägen om något minimalare kör skriptet.
+owner_of() {
+  stat -c '%u:%g' "$1" 2>/dev/null \
+    || ls -ldn "$1" 2>/dev/null | awk '{print $3":"$4}' \
+    || true
+}
+
 for d in "$ARCANE_ROOT_V/data" "$ARCANE_ROOT_V/builds" "$ARCANE_ROOT_V/backups" "$STACKS_DIR_V"; do
   if [ ! -d "$d" ]; then
     log "Skapar $d"
     mkdir -p "$d"
+    # Bara kataloger vi själva just skapade. En katalog som redan fanns kan
+    # ägas av en annan hanterare — chown:ar vi den kan Dockhand tappa
+    # skrivrätten till sina egna stackar.
+    chown "$PUID_V:$PGID_V" "$d" 2>/dev/null || warn "Kunde inte sätta ägare på $d"
+  else
+    cur="$(owner_of "$d")"
+    if [ -n "$cur" ] && [ "$cur" != "$PUID_V:$PGID_V" ]; then
+      warn "$d ägs av $cur (.env säger $PUID_V:$PGID_V)"
+      OWNER_MISMATCH=1
+    fi
   fi
-  # Bara på kataloger vi äger-sätter; -R hade kunnat trampa på befintliga stackar.
-  chown "$PUID_V:$PGID_V" "$d" 2>/dev/null || warn "Kunde inte sätta ägare på $d"
 done
+if [ "${OWNER_MISMATCH:-0}" -eq 1 ]; then
+  warn "Ägarskapen ovan lämnas orörda — att chown:a en katalog en annan"
+  warn "hanterare skriver i kan ta ifrån den skrivrätten. Sätt PUID/PGID i"
+  warn "$ENV_FILE till ägaren i stället, annars riskerar Arcane permission denied."
+fi
 chmod 700 "$ARCANE_ROOT_V/data" 2>/dev/null || true
+
+# Delar vi projektrot med en annan hanterare är det värt att veta om.
+# Hanterarens mount är typiskt en förälder till stacks-katalogen
+# (/volume1/docker/dockhand/app-data rymmer .../app-data/stacks), så testet
+# går åt det hållet.
+for other in dockhand portainer dokploy dockge komodo; do
+  docker inspect "$other" >/dev/null 2>&1 || continue
+  while read -r src; do
+    [ -n "$src" ] || continue
+    case "$STACKS_DIR_V/" in
+      "$src"/*)
+        log "Obs: projektroten ligger under '$other':s mount $src."
+        log "     Båda hanterarna ser samma stackar — deploya en och samma"
+        log "     stack från ett ställe i taget."
+        break
+        ;;
+    esac
+  done < <(docker inspect -f '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' "$other" 2>/dev/null || true)
+done
 
 # --- 4. Proxy-nätverk -------------------------------------------------------
 NET="$(get_env PROXY_NETWORK)"; NET="${NET:-proxy}"
@@ -167,7 +208,7 @@ if ! docker network inspect "$NET" >/dev/null 2>&1; then
   warn "Docker-nätverket '$NET' finns inte."
   warn "Kör Traefik redan? Ta reda på dess nätverk med:"
   warn "  docker inspect -f '{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}} {{end}}' <traefik-container>"
-  if [ "$ASSUME_YES" -eq 1 ] || { [ -t 0 ] && read -r -p "Skapa '$NET' nu? [j/N] " a && [ "$a" = "j" ]; }; then
+  if [ "$ASSUME_YES" -eq 1 ] || { [ -t 0 ] && read -r -p "Skapa '$NET' nu? [j/N] " a && [[ "$a" =~ ^[jJyY]$ ]]; }; then
     docker network create "$NET"
     log "Nätverket '$NET' skapat. Traefik måste också anslutas till det."
   else
@@ -176,6 +217,16 @@ if ! docker network inspect "$NET" >/dev/null 2>&1; then
 fi
 
 # --- 5. Deploy --------------------------------------------------------------
+# En container som heter arcane men tillhör ett annat compose-projekt får
+# `up -d` att falla på ett kryptiskt namnfel. Säg det rakt ut i stället.
+if docker inspect arcane >/dev/null 2>&1; then
+  existing_project="$(docker inspect -f '{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}' arcane 2>/dev/null || true)"
+  if [ -n "$existing_project" ] && [ "$existing_project" != "arcane" ]; then
+    die "En container som heter 'arcane' tillhör redan compose-projektet '$existing_project'.
+Ta bort den först (docker rm -f arcane) eller byt container_name i $COMPOSE_FILE."
+  fi
+fi
+
 log "Validerar compose-filen"
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --quiet
 

@@ -75,6 +75,8 @@ hdr "Docker-hanterare på den här värden"
 
 DOCKHAND_STACKS=""
 MANAGER_PARENTS=""
+SUGGEST_PUID=""
+SUGGEST_PGID=""
 
 for c in $containers; do
   image="$(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null || echo '?')"
@@ -110,6 +112,16 @@ for c in $containers; do
     esac
     MANAGER_PARENTS="$MANAGER_PARENTS$parent
 "
+  fi
+
+  # Hanterare som skriver i stacks-katalogen kör som en viss användare.
+  # Arcane måste köra som samma, annars blir det permission denied.
+  if [ "$kind" = "Dockhand" ] || [ "$kind" = "Dockge" ]; then
+    m_puid="$(env_val "$c" PUID)"; m_pgid="$(env_val "$c" PGID)"
+    if [ -n "$m_puid" ]; then
+      SUGGEST_PUID="$m_puid"; SUGGEST_PGID="$m_pgid"
+      say "      kör som PUID=$m_puid PGID=${m_pgid:-?}"
+    fi
   fi
 
   # Dockhand: härled var stackarna ligger på värden.
@@ -192,9 +204,21 @@ case "$SUGGEST_ROOT/" in
   "$SUGGEST_STACKS"/*) SUGGEST_ROOT="/opt/arcane" ;;
 esac
 
+# Faller ingen hanterare ut: ta ägaren till stacks-katalogen som den finns
+# på disken. På Synology är det typiskt 1026:100, inte 1000:1000.
+if [ -z "$SUGGEST_PUID" ] && [ -d "$SUGGEST_STACKS" ]; then
+  owner="$(stat -c '%u:%g' "$SUGGEST_STACKS" 2>/dev/null \
+    || ls -ldn "$SUGGEST_STACKS" 2>/dev/null | awk '{print $3":"$4}' || true)"
+  case "$owner" in
+    [0-9]*:[0-9]*) SUGGEST_PUID="${owner%%:*}"; SUGGEST_PGID="${owner##*:}" ;;
+  esac
+fi
+
 if [ "$SUGGEST_ONLY" -eq 1 ]; then
   printf 'ARCANE_ROOT=%s\n' "$SUGGEST_ROOT"
   printf 'STACKS_DIR=%s\n' "$SUGGEST_STACKS"
+  [ -n "$SUGGEST_PUID" ] && printf 'PUID=%s\n' "$SUGGEST_PUID"
+  [ -n "$SUGGEST_PGID" ] && printf 'PGID=%s\n' "$SUGGEST_PGID"
   exit 0
 fi
 
@@ -203,6 +227,13 @@ say ""
 say "  # Arcane läggs bredvid de andra hanterarna i $APP_ROOT"
 say "  ARCANE_ROOT=$SUGGEST_ROOT"
 say "  STACKS_DIR=$SUGGEST_STACKS"
+if [ -n "$SUGGEST_PUID" ]; then
+  say "  PUID=$SUGGEST_PUID"
+  say "  PGID=$SUGGEST_PGID"
+  say ""
+  say "  (PUID/PGID läst från den hanterare som redan skriver i stacks-katalogen"
+  say "   — Arcane måste köra som samma användare för att inte få permission denied)"
+fi
 say ""
 say "  Kör  sudo bash scripts/install-arcane.sh --autodetect  för att sätta dem."
 say ""

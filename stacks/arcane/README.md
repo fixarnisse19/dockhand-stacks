@@ -78,10 +78,16 @@ bash scripts/inspect-docker-layout.sh          # var ligger allting idag?
 sudo bash scripts/install-arcane.sh --autodetect
 ```
 
-`--autodetect` sätter `ARCANE_ROOT` och `STACKS_DIR` efter vad som faktiskt
-finns på värden: Arcane hamnar bredvid Dockhand och Portainer, och projektroten
-pekas på den katalog stackarna redan ligger i. Utan flaggan används värdena i
-`.env`. Miljövariabler du sätter själv vinner alltid över autodetekteringen.
+`--autodetect` sätter `ARCANE_ROOT`, `STACKS_DIR`, `PUID` och `PGID` efter vad
+som faktiskt finns på värden: Arcane hamnar bredvid Dockhand och Portainer,
+projektroten pekas på den katalog stackarna redan ligger i, och användaren tas
+från den hanterare som redan skriver där (på Synology typiskt `1026:100`, inte
+`1000:1000`). Utan flaggan används värdena i `.env`. Miljövariabler du sätter
+själv vinner alltid över autodetekteringen.
+
+Skriptet **chown:ar aldrig en katalog som redan fanns** — att ta över ägarskapet
+på Dockhands stacks-katalog kan ta ifrån Dockhand skrivrätten. Stämmer inte
+ägaren med `PUID`/`PGID` varnar det och ber dig ändra `.env` i stället.
 
 Skriptet frågar efter domän, genererar `ENCRYPTION_KEY`, skapar katalogerna med
 rätt ägare, kontrollerar att Traefiks nätverk finns och startar stacken. Det är
