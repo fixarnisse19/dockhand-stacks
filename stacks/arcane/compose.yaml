@@ -1,0 +1,105 @@
+# Arcane — Docker-hantering för spectre-green (Synology, /volume1/docker)
+#
+# Deployas manuellt EN gång med scripts/install-arcane.sh. Därefter sköter
+# Arcane alla andra stackar i den här repon via GitOps.
+#
+# Arcane hanterar medvetet INTE sig själv som projekt: den egna katalogen
+# (${ARCANE_ROOT}) ligger utanför projektroten (${STACKS_DIR}), eftersom en
+# container inte kan riva och återskapa sig själv mitt i en redeploy.
+
+name: arcane
+
+services:
+  arcane:
+    image: ghcr.io/getarcaneapp/manager:${ARCANE_IMAGE_TAG:-latest}
+    container_name: arcane
+    restart: unless-stopped
+
+    # Ger Arcane korrekta cgroup-mätvärden (CPU/minne per container).
+    # Kräver Docker Compose v2.15+. Får du felet
+    #   "Additional property cgroup is not allowed"
+    # så kommentera bort raden — allt utom statistikgrafer fungerar ändå.
+    cgroup: host
+
+    environment:
+      # Publik URL. Måste stämma exakt, annars går OIDC/passkeys/websockets fel.
+      APP_URL: ${APP_URL:?APP_URL saknas - kopiera .env.example till .env}
+      # 32 bytes. Genereras av install-arcane.sh (openssl rand -hex 32).
+      # Byts den ut går alla sparade registry-/git-credentials förlorade.
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY saknas - kor scripts/install-arcane.sh}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Europe/Stockholm}
+      # Krävs bakom Traefik för att X-Forwarded-* ska litas på.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
+      # Samma sökväg som på värden — se kommentaren vid volymen nedan.
+      PROJECTS_DIRECTORY: ${STACKS_DIR:?}
+      PROJECT_SCAN_MAX_DEPTH: ${PROJECT_SCAN_MAX_DEPTH:-4}
+      ARCANE_BACKUP_VOLUME_NAME: ${ARCANE_BACKUP_VOLUME_NAME:-arcane-backups}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+    volumes:
+      # Docker-API. Byt mot socket-proxy via compose.socket-proxy.yaml om du
+      # vill härda uppsättningen.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Databas, inställningar, git-arbetskopior, templates.
+      - ${ARCANE_ROOT:?}/data:/app/data
+      # Projektroten, monterad på SAMMA sökväg inuti containern som på
+      # värden. Det är inte kosmetika: Docker-daemonen tolkar bind mounts mot
+      # värdens filsystem, så en stack med `./config:/config` skulle annars
+      # peka på en sökväg som bara finns inuti Arcane-containern. Samma
+      # avvikelse gör att Arcane läser fel `com.docker.compose.project.
+      # working_dir` och visar körande projekt som stoppade.
+      # https://github.com/getarcaneapp/arcane/issues/2597
+      - ${STACKS_DIR:?}:${STACKS_DIR:?}
+      # Arbetsyta för image-builds (Settings -> Builds -> Builds Directory=/builds).
+      - ${ARCANE_ROOT:?}/builds:/builds
+      # Volymbackuper (rustic-snapshots). Ligger på /volume1 => med i NAS-backupen.
+      - ${ARCANE_ROOT:?}/backups:/backups
+
+    ports:
+      # Behålls medvetet även med Traefik: går reverse proxyn ner måste du
+      # fortfarande kunna nå Docker-hanteringen. Bind till LAN-IP i .env om
+      # NAS:en är exponerad mot internet.
+      - "${ARCANE_BIND_ADDR:-0.0.0.0}:${ARCANE_PORT:-3552}:3552"
+
+    healthcheck:
+      test: ["CMD", "./arcane", "health", "--timeout", "2s"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Ger databasmigreringarna tid vid första starten och efter uppgradering.
+      start_period: 30s
+
+    networks:
+      - proxy
+
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${PROXY_NETWORK:-proxy}
+
+      # gRPC-router: edge-agenter (andra Docker-värdar) tunnlar in här.
+      # Måste ha högre priority än web-routern och h2c mot backend.
+      traefik.http.routers.arcane-grpc.rule: Host(`${ARCANE_HOST:?ARCANE_HOST saknas}`) && Path(`/api/tunnel/connect`) && Method(`POST`) && HeaderRegexp(`Content-Type`, `^application/grpc`)
+      traefik.http.routers.arcane-grpc.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.arcane-grpc.priority: "100"
+      traefik.http.routers.arcane-grpc.tls: "true"
+      traefik.http.routers.arcane-grpc.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.routers.arcane-grpc.service: arcane-grpc
+      traefik.http.services.arcane-grpc.loadbalancer.server.port: "3552"
+      traefik.http.services.arcane-grpc.loadbalancer.server.scheme: h2c
+
+      # Web-router: UI, REST-API och websockets (loggar, terminal, live-stats).
+      traefik.http.routers.arcane-web.rule: Host(`${ARCANE_HOST:?ARCANE_HOST saknas}`)
+      traefik.http.routers.arcane-web.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.arcane-web.priority: "10"
+      traefik.http.routers.arcane-web.tls: "true"
+      traefik.http.routers.arcane-web.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.routers.arcane-web.service: arcane-web
+      traefik.http.services.arcane-web.loadbalancer.server.port: "3552"
+      traefik.http.services.arcane-web.loadbalancer.server.scheme: http
+
+networks:
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-proxy}

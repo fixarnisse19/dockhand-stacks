@@ -1,0 +1,10 @@
+# Hemligheter — .env innehåller ENCRYPTION_KEY, tokens och lösenord.
+.env
+*.env
+!.env.example
+!*.env.example
+
+# Arcanes runtime-data ska aldrig hamna i git.
+data/
+backups/
+builds/

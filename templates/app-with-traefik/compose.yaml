@@ -1,0 +1,45 @@
+# Mall: så här ser en app ut när Arcane har tagit över Dokployrollen.
+#
+# Kopiera hela katalogen till stacks/<appnamn>/, byt ut image och domän,
+# committa och pusha. I Arcane: Projects -> Create Project -> From Git Repo,
+# peka på stacks/<appnamn>/compose.yaml och slå på Auto Sync.
+#
+# Det Dokploy gjorde åt dig och som nu ligger här i klartext:
+#   - domän/routing  -> traefik-labels nedan
+#   - TLS            -> certresolver på Traefik
+#   - env/secrets    -> .env i projektkatalogen (redigeras i Arcanes UI)
+#   - redeploy       -> Auto Sync (pollning) + "Redeploy After Sync"
+#   - healthchecks   -> healthcheck nedan (Traefik plockar inte upp den, men
+#                       Arcane visar status och `depends_on` kan använda den)
+
+name: app-with-traefik
+
+services:
+  app:
+    image: ${APP_IMAGE:?APP_IMAGE saknas}
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Europe/Stockholm}
+    # Publicera INTE portar här — Traefik når containern via proxy-nätverket.
+    # Att hoppa över ports: är hela poängen; annars ligger appen naken på LAN.
+    networks:
+      - proxy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${APP_PORT:-8080}/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${PROXY_NETWORK:-proxy}
+      traefik.http.routers.${APP_NAME:?APP_NAME saknas}.rule: Host(`${APP_HOST:?APP_HOST saknas}`)
+      traefik.http.routers.${APP_NAME}.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.${APP_NAME}.tls: "true"
+      traefik.http.routers.${APP_NAME}.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.services.${APP_NAME}.loadbalancer.server.port: ${APP_PORT:-8080}
+
+networks:
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-proxy}
