@@ -1,0 +1,37 @@
+# Arcane Edge Agent — körs på ANDRA Docker-värdar än spectre-green.
+#
+# Gör att en värd utan öppna inkommande portar ändå kan hanteras från
+# Arcane på spectre-green: agenten ringer själv ut till managern.
+#
+# 1. I Arcane: Environments -> Add Environment -> Edge, ange namn.
+# 2. Kopiera AGENT_TOKEN från den genererade snippeten hit i .env.
+# 3. Kör `docker compose up -d` på den andra värden.
+#
+# Behöver du i stället direktläge (managern ringer ut till agenten) sätter du
+# AGENT_MODE=true, tar bort EDGE_*-variablerna och publicerar port 3553.
+
+name: arcane-agent
+
+services:
+  arcane-agent:
+    image: ghcr.io/getarcaneapp/agent:${ARCANE_IMAGE_TAG:-latest}
+    container_name: arcane-edge-agent
+    restart: unless-stopped
+    environment:
+      EDGE_AGENT: "true"
+      # "poll" är säkrast genom brandväggar/proxies; "auto" försöker gRPC först.
+      EDGE_TRANSPORT: ${EDGE_TRANSPORT:-poll}
+      AGENT_TOKEN: ${AGENT_TOKEN:?AGENT_TOKEN saknas - hamtas i Arcane under Environments}
+      # Managerns adress sedd från DEN HÄR värden. LAN-IP fungerar oftast
+      # bättre än den publika domänen (ingen hårnålsrouting, inget cert-krångel).
+      MANAGER_API_URL: ${MANAGER_API_URL:?MANAGER_API_URL saknas}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Europe/Stockholm}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - arcane-agent-data:/app/data
+
+volumes:
+  arcane-agent-data:
+    name: arcane-agent-data

@@ -1,0 +1,139 @@
+# Härdad variant: Arcane utan direkt tillgång till /var/run/docker.sock.
+#
+# Detta är ett ALTERNATIV till compose.yaml, inte ett override-lager
+# (compose kan lägga till volymer i ett override, men inte ta bort
+# docker.sock-monteringen — därför en komplett egen fil).
+#
+# Använd den så här i stället för compose.yaml:
+#   docker compose -f compose.socket-proxy.yaml up -d
+#
+# Samma .env som compose.yaml. Byte fram och tillbaka är säkert: databasen
+# ligger i ${ARCANE_ROOT}/data och rörs inte.
+
+name: arcane
+
+services:
+  docker-socket-proxy:
+    image: wollomatic/socket-proxy:1.13.1
+    container_name: arcane-docker-proxy
+    restart: unless-stopped
+    user: "0:0"
+    command:
+      - "-listenip=0.0.0.0"
+      # Endast containern som heter "arcane" får prata med proxyn.
+      - "-allowfrom=arcane"
+      - "-allowhealthcheck"
+      - "-allowGET=(/v[d.]+)?/_ping"
+      - "-allowGET=(/v[d.]+)?/events(/.*)?"
+      - "-allowGET=(/v[d.]+)?/version"
+      - "-allowGET=(/v[d.]+)?/info(/.*)?"
+      - "-allowGET=(/v[d.]+)?/containers(/.*)?"
+      - "-allowGET=(/v[d.]+)?/exec(/.*)?"
+      - "-allowGET=(/v[d.]+)?/images(/.*)?"
+      - "-allowGET=(/v[d.]+)?/networks(/.*)?"
+      - "-allowGET=(/v[d.]+)?/volumes(/.*)?"
+      - "-allowGET=(/v[d.]+)?/distribution(/.*)?"
+      - "-allowGET=(/v[d.]+)?/swarm(/.*)?"
+      - "-allowGET=(/v[d.]+)?/nodes(/.*)?"
+      - "-allowGET=(/v[d.]+)?/services(/.*)?"
+      - "-allowGET=(/v[d.]+)?/tasks(/.*)?"
+      - "-allowGET=(/v[d.]+)?/secrets(/.*)?"
+      - "-allowGET=(/v[d.]+)?/configs(/.*)?"
+      - "-allowHEAD=(/v[d.]+)?/_ping"
+      - "-allowHEAD=(/v[d.]+)?/version"
+      - "-allowPOST=(/v[d.]+)?/containers(/.*)?"
+      - "-allowPOST=(/v[d.]+)?/exec(/.*)?"
+      - "-allowPOST=(/v[d.]+)?/images(/.*)?"
+      - "-allowPOST=(/v[d.]+)?/networks(/.*)?"
+      - "-allowPOST=(/v[d.]+)?/volumes(/.*)?"
+      - "-allowPOST=(/v[d.]+)?/commit"
+      - "-allowPOST=(/v[d.]+)?/build(/.*)?"
+      - "-allowPOST=(/v[d.]+)?/session"
+      - "-allowPOST=(/v[d.]+)?/grpc"
+      - "-allowPOST=(/v[d.]+)?/auth"
+      - "-allowPOST=(/v[d.]+)?/swarm(/.*)?"
+      - "-allowPOST=(/v[d.]+)?/nodes(/.*)?"
+      - "-allowPOST=(/v[d.]+)?/services(/.*)?"
+      - "-allowPOST=(/v[d.]+)?/secrets(/.*)?"
+      - "-allowPOST=(/v[d.]+)?/configs(/.*)?"
+      - "-allowPUT=(/v[d.]+)?/containers(/.*)?"
+      - "-allowDELETE=(/v[d.]+)?/containers(/.*)?"
+      - "-allowDELETE=(/v[d.]+)?/images(/.*)?"
+      - "-allowDELETE=(/v[d.]+)?/networks(/.*)?"
+      - "-allowDELETE=(/v[d.]+)?/volumes(/.*)?"
+      - "-allowDELETE=(/v[d.]+)?/nodes(/.*)?"
+      - "-allowDELETE=(/v[d.]+)?/services(/.*)?"
+      - "-allowDELETE=(/v[d.]+)?/secrets(/.*)?"
+      - "-allowDELETE=(/v[d.]+)?/configs(/.*)?"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - arcane-internal
+
+  arcane:
+    image: ghcr.io/getarcaneapp/manager:${ARCANE_IMAGE_TAG:-latest}
+    container_name: arcane
+    restart: unless-stopped
+    depends_on:
+      - docker-socket-proxy
+    environment:
+      APP_URL: ${APP_URL:?APP_URL saknas - kopiera .env.example till .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY saknas - kor scripts/install-arcane.sh}
+      # Enda egentliga skillnaden mot compose.yaml.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Europe/Stockholm}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
+      PROJECTS_DIRECTORY: /app/data/projects
+      PROJECT_SCAN_MAX_DEPTH: ${PROJECT_SCAN_MAX_DEPTH:-4}
+      ARCANE_BACKUP_VOLUME_NAME: ${ARCANE_BACKUP_VOLUME_NAME:-arcane-backups}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ${ARCANE_ROOT:?}/data:/app/data
+      - ${STACKS_DIR:?}:/app/data/projects
+      - ${ARCANE_ROOT:?}/builds:/builds
+      - ${ARCANE_ROOT:?}/backups:/backups
+    ports:
+      - "${ARCANE_BIND_ADDR:-0.0.0.0}:${ARCANE_PORT:-3552}:3552"
+    healthcheck:
+      test: ["CMD", "./arcane", "health", "--timeout", "2s"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    networks:
+      - arcane-internal
+      - proxy
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${PROXY_NETWORK:-proxy}
+      traefik.http.routers.arcane-grpc.rule: Host(`${ARCANE_HOST:?ARCANE_HOST saknas}`) && Path(`/api/tunnel/connect`) && Method(`POST`) && HeaderRegexp(`Content-Type`, `^application/grpc`)
+      traefik.http.routers.arcane-grpc.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.arcane-grpc.priority: "100"
+      traefik.http.routers.arcane-grpc.tls: "true"
+      traefik.http.routers.arcane-grpc.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.routers.arcane-grpc.service: arcane-grpc
+      traefik.http.services.arcane-grpc.loadbalancer.server.port: "3552"
+      traefik.http.services.arcane-grpc.loadbalancer.server.scheme: h2c
+      traefik.http.routers.arcane-web.rule: Host(`${ARCANE_HOST:?ARCANE_HOST saknas}`)
+      traefik.http.routers.arcane-web.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.arcane-web.priority: "10"
+      traefik.http.routers.arcane-web.tls: "true"
+      traefik.http.routers.arcane-web.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.routers.arcane-web.service: arcane-web
+      traefik.http.services.arcane-web.loadbalancer.server.port: "3552"
+      traefik.http.services.arcane-web.loadbalancer.server.scheme: http
+
+networks:
+  arcane-internal:
+    driver: bridge
+    name: arcane-internal
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-proxy}
